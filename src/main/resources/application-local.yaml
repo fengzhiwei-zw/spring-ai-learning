@@ -1,0 +1,9 @@
+# 临时学习模式：不连接 Redis / Chroma，聊天仍调用真实模型服务。
+# IDEA 的 Active profiles 填 local，或启动时传 --spring.profiles.active=local。
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.chat.memory.redis.autoconfigure.RedisChatMemoryAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.DataRedisRepositoriesAutoConfiguration

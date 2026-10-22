@@ -14,7 +14,7 @@
 | Prompt | 角色设置、外部 `code-review.st` 模板 | 已有示例 |
 | 结构化输出 | `Book`、`List<Book>`、`StockInfo`、`UserProfile` | ChatClient 示例显式启用 Schema 反馈重试，解析后执行业务校验 |
 | 多模态 | 图片理解接口 | 已附带三色测试图片；可用 `AI_IMAGE_MODEL` 选择支持视觉输入的模型 |
-| 短期记忆 | Redis + `MessageWindowChatMemory` | 窗口上限为 20 条消息，不是 20 轮对话，也不是完整聊天档案 |
+| 短期记忆 | Redis 或本地内存 + `MessageWindowChatMemory` | `local` 模式使用内存；窗口上限为 20 条消息，不是 20 轮对话 |
 | 文档入库 | Tika → 分块 → Embedding → Chroma | 校验资源、过滤空内容、稳定 ID 去重及同源版本清理；尚无对外导入入口 |
 | RAG | 查询改写 + 向量检索 + 上下文增强 | 对话客户端启用；空检索允许继续回答；`topK=5`、阈值 `0.55` |
 | 工具调用 | `WeatherTool` 的天气与时间工具 | 天气明确标为模拟数据；同步和流式工具循环均限制轮数与调用次数 |
@@ -57,6 +57,7 @@ src/main/java/com/feng/springailearning/
     └── LongTermMemoryWriter.java
 src/main/resources/
 ├── application.yaml
+├── application-local.yaml               # 无 Redis / Chroma 的临时学习模式
 ├── prompts/code-review.st
 └── static/demo.png                       # 红、绿、蓝三色测试图片
 src/test/java/com/feng/springailearning/
@@ -69,7 +70,39 @@ doc/
 
 ## 本地运行
 
+### 无中间件临时启动（local）
+
+只想先测试聊天功能时，不必启动 Redis、Chroma 或其他数据库。使用 `local` Profile：
+
+```bash
+export DASHSCOPE_API_KEY='替换为你的 API Key'
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+```
+
+IDEA 中打开 **Run → Edit Configurations → SpringAiDemoApplication**，将 **Active profiles** 设为 `local`，点击 Run。当前本机运行配置已经这样设置。
+
+| 功能 | local 模式 |
+| --- | --- |
+| 普通聊天、SSE、角色与创意调用 | 保留，仍调用配置的真实模型 |
+| 结构化输出、代码审查、图片理解 | 保留；图片仍需视觉模型支持 |
+| 天气 / 时间工具 | 保留；天气仍是模拟数据 |
+| 会话记忆 | 使用 `InMemoryChatMemoryRepository`，保留 20 条消息窗口 |
+| Redis / Chroma / Embedding Bean | 不创建，也不连接这些服务 |
+| RAG、向量记忆、文档入库 Service | 在此 Profile 下停用 |
+
+内存会话会在应用重启后丢失，多个应用进程之间也不共享。`local` 免除存储中间件，但不是离线模型模式，仍需要可用的模型服务和 API Key。这里使用 Spring AI 提供的 [内存记忆仓库](https://docs.spring.io/spring-ai/reference/api/chat-memory.html)。
+
+验证启动：
+
+```bash
+curl http://localhost:8080/actuator/health
+```
+
+正常返回 HTTP 200 和 `"status":"UP"`。聊天及会话记忆的验证命令见下方“验证调用”。恢复 Redis + Chroma 模式时，移除 `local` Profile，并准备下面的依赖服务。
+
 ### 1. 准备依赖服务
+
+本节及下面未指定 Profile 的启动命令使用默认完整模式。
 
 - JDK 21，以及可下载 Maven 依赖的网络环境。
 - 可用的 DashScope API Key，以及账号有权限调用的对话模型和 Embedding 模型。
@@ -100,7 +133,7 @@ export DASHSCOPE_API_KEY='替换为你的 API Key'
 
 模型名称是配置中的当前值，请先确认账号权限、模型可用性及 Embedding 维度支持情况。可通过 `AI_EMBEDDING_MODEL`、`AI_EMBEDDING_DIMENSIONS`、`CHROMA_BASE_URL`、`AI_IMAGE_MODEL` 覆盖对应参数。对话与 Embedding 请求超时均配置为 60 秒；这是单次外部请求超时，不是整个对话任务的总时限。
 
-`spring.ai.model.embedding: none` 和 `spring.ai.vectorstore.type: none` 用来关闭相应自动配置；项目仍通过 `@Bean` 手动创建 Embedding 和两个 Chroma 向量库，因此仍依赖这些服务。
+`spring.ai.model.embedding: none` 和 `spring.ai.vectorstore.type: none` 用来关闭相应自动配置；默认模式仍通过 `@Bean` 手动创建 Embedding 和两个 Chroma 向量库，因此需要这些服务。`local` 模式同时停用这些手工 Bean。
 
 > 知识库 collection 为 `knowledge-base-text-embedding-v4-1024-v1`，记忆 collection 为 `chat-memory-text-embedding-v4-1024-v1`。名称中的模型标识与当前 Embedding 配置不一致。切换 Embedding 模型或维度时，建议新建 collection 并重新入库，避免混用不同模型生成的向量。
 
@@ -121,11 +154,11 @@ Windows 使用 `mvnw.cmd spring-boot:run`。默认 HTTP 端口为 `8080`。
 java -jar target/spring-ai-learning-0.0.1-SNAPSHOT.jar
 ```
 
-`-DskipTests` 只跳过测试执行；应用启动仍需要前面的配置和依赖服务。
+`-DskipTests` 只跳过测试执行；应用启动仍需要所选模式的配置和服务。打包后使用 local 模式可执行 `java -jar target/spring-ai-learning-0.0.1-SNAPSHOT.jar --spring.profiles.active=local`。
 
 ### 4. 验证调用
 
-下面是当前接口的调用示例。对话客户端仍使用 RAG，知识库为空时允许继续普通回答。代码审查、结构化提取和图片接口使用独立客户端，避免被知识检索改写。空检索回退不代表向量服务故障时也自动降级，应用仍需可用的 Redis、Chroma 和模型服务。
+下面是当前接口的调用示例。默认完整模式的对话客户端使用 RAG，空召回允许继续普通回答，但不会对向量服务故障自动降级。`local` 模式不装配 RAG，直接使用模型和内存会话。代码审查、结构化提取和图片接口使用独立客户端。
 
 同步对话与会话记忆：
 
@@ -236,7 +269,9 @@ ChatController / Stage3Controller
 ./mvnw test
 ```
 
-当前有 30 项可重复测试，覆盖会话隔离、输入与输出校验、Prompt 顺序、失败记忆、RAG 空检索、真实 Java 工具执行、工具预算、SSE 取消、日志脱敏、Redis 配置及文档入库。测试使用固定模型响应并替换 Redis、Chroma 等外部边界，不需要真实 API Key 或正在运行的依赖服务。真实模型、Redis、Chroma 的端到端联调需要另行准备运行环境。
+当前有 33 项可重复测试，覆盖会话隔离、输入与输出校验、Prompt 顺序、失败记忆、RAG 空检索、真实 Java 工具执行、工具预算、SSE 取消、日志脱敏、Redis 配置及文档入库。新增 `LocalProfileTests` 不替换中间件 Bean，验证 local 的真实装配、内存窗口和健康接口，确认没有创建 Redis、Chroma、Embedding、RAG 和入库 Service。测试不需要真实 API Key 或正在运行的依赖服务。
+
+本机在 IDEA 的 local 模式下已完成真实启动验证：健康接口返回 UP，连续两轮模型调用返回 200，第二轮能够回忆第一轮提供的名字。Redis、Chroma 完整模式仍需另外准备服务。
 
 - [现有功能修复说明](doc/现有功能修复说明.md)
 - [原始学习路线](doc/ReadMe.md)
