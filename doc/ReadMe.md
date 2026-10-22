@@ -1,3 +1,5 @@
+> 这是早期学习路线，当前配置、API 和已修复问题请优先参考 [项目 README](../README.md) 与 [现有功能修复说明](现有功能修复说明.md)。
+
 好的，作为 Spring AI 专家，我来为你量身定制一套**从零到精通**的系统学习方案。Spring AI 2.0.0 GA 已于 2026 年 6 月 12 日正式发布，这是 Java AI 开发的里程碑版本，现在正是入手的最佳时机。
 
 ---
@@ -203,14 +205,14 @@ System.out.println(movie.title()); // 直接访问字段
 
 **3. 自纠错结构化输出**
 
-当模型返回的 JSON 不符合目标 Schema 时，自纠错机制会自动将校验错误回传给模型，要求模型重新生成合规输出，无需开发者编写额外的解析或重试逻辑：
+显式启用 `validateSchema()` 后，框架会将不符合 Schema 的输出反馈给模型并有限次重试。重试不保证成功，DTO 的 Jakarta 业务约束仍需显式校验；参见当前项目的 `AiResponses` 和 Controller 实现：
 
 ```java
 // 框架自动处理格式错误，要求模型重新生成
 List<Movie> movies = chatClient.prompt()
         .user("推荐3部经典科幻电影")
         .call()
-        .entity(new ParameterizedTypeReference<List<Movie>>() {});
+        .entity(new ParameterizedTypeReference<List<Movie>>() {}, spec -> spec.validateSchema());
 ```
 
 **4. 多模态输入**

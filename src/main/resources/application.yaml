@@ -1,4 +1,7 @@
 spring:
+  mvc:
+    problemdetails:
+      enabled: true
   application:
     name: spring-ai-demo
   ai:
@@ -6,8 +9,14 @@ spring:
       base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
       api-key: ${DASHSCOPE_API_KEY}
       chat:
+        timeout: 60s
         options:
           model: qwen3.8-27b
+      embedding:
+        options:
+          model: ${AI_EMBEDDING_MODEL:qwen3.7-text-embedding-flash}
+        dimensions: ${AI_EMBEDDING_DIMENSIONS:1024}
+        timeout: 60s
     chat:
       memory:
         redis:
@@ -17,3 +26,13 @@ spring:
       embedding: none
     vectorstore:
       type: none
+
+app:
+  ai:
+    chroma-base-url: ${CHROMA_BASE_URL:http://localhost:8000}
+    # 保留已有 collection 名称，避免升级配置时丢失对已有数据的引用。
+    knowledge-collection: ${KNOWLEDGE_COLLECTION:knowledge-base-text-embedding-v4-1024-v1}
+    memory-collection: ${MEMORY_COLLECTION:chat-memory-text-embedding-v4-1024-v1}
+    image-model: ${AI_IMAGE_MODEL:${spring.ai.openai.chat.options.model}}
+    max-tool-rounds: 5
+    max-tool-calls: 10

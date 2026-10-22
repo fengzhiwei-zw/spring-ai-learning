@@ -82,6 +82,10 @@ public final class LongTermMemoryWriter {
     private static void validateScope(String tenantId, String ownerId) {
         Assert.hasText(tenantId, "tenantId must not be blank");
         Assert.hasText(ownerId, "ownerId must not be blank");
+        Assert.isTrue(tenantId.equals(tenantId.trim()) && ownerId.equals(ownerId.trim()),
+                "Scope identifiers must not have surrounding whitespace");
+        Assert.isTrue(tenantId.indexOf('\u001f') < 0 && ownerId.indexOf('\u001f') < 0,
+                "Scope identifiers must not contain the reserved separator");
         Assert.isTrue(tenantId.length() <= 128, "tenantId must not exceed 128 characters");
         Assert.isTrue(ownerId.length() <= 128, "ownerId must not exceed 128 characters");
     }
@@ -94,6 +98,8 @@ public final class LongTermMemoryWriter {
 
         private void validate() {
             Assert.hasText(this.memoryKey, "memoryKey must not be blank");
+            Assert.isTrue(this.memoryKey.indexOf('\u001f') < 0,
+                    "memoryKey must not contain the reserved separator");
             Assert.hasText(this.type, "type must not be blank");
             Assert.hasText(this.content, "content must not be blank");
             Assert.hasText(this.sourceConversationId, "sourceConversationId must not be blank");

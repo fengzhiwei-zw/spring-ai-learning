@@ -3,7 +3,9 @@ package com.feng.springailearning.advisor;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.time.Instant;
 
 import org.jspecify.annotations.NonNull;
 import org.slf4j.Logger;
@@ -156,23 +158,34 @@ public final class ProductionVectorMemoryAdvisor implements BaseAdvisor, MemoryA
             return "";
         }
 
-        String joined = documents.stream()
+        // 只注入完整条目，不能在 XML 标签、转义实体或 Unicode 代理对中间截断。
+        List<Document> sorted = documents.stream()
                 .filter(Objects::nonNull)
                 .filter(document -> StringUtils.hasText(document.getText()))
-                .map(document -> {
-                    Map<String, Object> metadata = document.getMetadata();
-                    String type = escapeXml(Objects.toString(metadata.getOrDefault(META_TYPE, "fact")));
-                    String updatedAt = escapeXml(Objects.toString(metadata.getOrDefault(META_UPDATED_AT, "unknown")));
-                    return "<memory-entry type=\"%s\" updated-at=\"%s\">%s</memory-entry>"
-                            .formatted(type, updatedAt, escapeXml(document.getText()));
-                })
-                .distinct()
-                .collect(Collectors.joining(System.lineSeparator()));
-
-        if (joined.length() <= this.maxInjectedCharacters) {
-            return joined;
+                .sorted(Comparator.comparing(ProductionVectorMemoryAdvisor::updatedAt).reversed())
+                .toList();
+        StringBuilder result = new StringBuilder();
+        var seen = new HashSet<String>();
+        for (Document document : sorted) {
+            Map<String, Object> metadata = document.getMetadata();
+            String type = escapeXml(Objects.toString(metadata.getOrDefault(META_TYPE, "fact")));
+            String updatedAt = escapeXml(Objects.toString(metadata.getOrDefault(META_UPDATED_AT, "unknown")));
+            String entry = "<memory-entry type=\"%s\" updated-at=\"%s\">%s</memory-entry>"
+                    .formatted(type, updatedAt, escapeXml(document.getText()));
+            if (seen.add(entry) && result.length() + entry.length() + (result.isEmpty() ? 0 : 1) <= this.maxInjectedCharacters) {
+                if (!result.isEmpty()) result.append('\n');
+                result.append(entry);
+            }
         }
-        return joined.substring(0, this.maxInjectedCharacters) + "\n<!-- memory truncated -->";
+        return result.toString();
+    }
+
+    private static Instant updatedAt(Document document) {
+        try {
+            return Instant.parse(Objects.toString(document.getMetadata().get(META_UPDATED_AT), ""));
+        } catch (java.time.format.DateTimeParseException exception) {
+            return Instant.MIN;
+        }
     }
 
     private int resolveTopK(Map<String, Object> context) {
@@ -195,8 +208,10 @@ public final class ProductionVectorMemoryAdvisor implements BaseAdvisor, MemoryA
     }
 
     private static String requiredContext(Map<String, Object> context, String key) {
-        String value = Objects.toString(context.get(key), "").trim();
+        String value = Objects.toString(context.get(key), "");
         Assert.hasText(value, key + " must not be blank");
+        Assert.isTrue(value.equals(value.trim()) && value.indexOf('\u001f') < 0,
+                key + " contains surrounding whitespace or a reserved separator");
         Assert.isTrue(value.length() <= 128, key + " must not exceed 128 characters");
         return value;
     }

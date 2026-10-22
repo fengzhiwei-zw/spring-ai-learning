@@ -7,37 +7,44 @@ import java.time.Duration;
 import java.util.HexFormat;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
+import org.springframework.ai.chat.client.ChatClientMessageAggregator;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisor;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisor;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.jspecify.annotations.NonNull;
 import org.springframework.util.Assert;
+import org.springframework.core.Ordered;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.SignalType;
 
 /**
- * Production-safe logging for synchronous Spring AI calls.
+ * Metadata logging for synchronous and streaming Spring AI calls.
  *
  * <p>Prompt/completion bodies are disabled by default. Prefer Spring AI's
  * Micrometer observations for metrics and traces; this advisor adds concise,
  * searchable application logs.</p>
  */
-public final class ProductionLoggingAdvisor implements CallAdvisor {
+public final class ProductionLoggingAdvisor implements CallAdvisor, StreamAdvisor {
 
     private static final Logger log = LoggerFactory.getLogger(ProductionLoggingAdvisor.class);
 
     private static final Pattern BEARER_TOKEN = Pattern.compile(
-            "(?i)(authorization\\s*[:=]\\s*bearer\\s+)[^\\s,;]+"
+            "(?i)([\"']?authorization[\"']?\\s*[:=]\\s*[\"']?bearer\\s+)[^\\s,;\"']+"
     );
     private static final Pattern SECRET_VALUE = Pattern.compile(
-            "(?i)((?:api[-_]?key|access[-_]?token|secret|password)\\s*[:=]\\s*)[^\\s,;]+"
+            "(?i)([\"']?(?:api[-_]?key|access[-_]?token|secret|password)[\"']?\\s*[:=]\\s*)(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|[^\\s,;]+)"
     );
 
     private final int order;
@@ -47,7 +54,40 @@ public final class ProductionLoggingAdvisor implements CallAdvisor {
 
     /** Safe production defaults: metadata only, no stack trace or content. */
     public ProductionLoggingAdvisor() {
-        this(1_000, false, 1_000, false);
+        this(Ordered.HIGHEST_PRECEDENCE + 50, false, 1_000, false);
+    }
+
+    @Override
+    public @NonNull Flux<ChatClientResponse> adviseStream(
+            @NonNull ChatClientRequest request, @NonNull StreamAdvisorChain chain) {
+        // 每次订阅独立计时和聚合；不提前订阅，不吞异常，也不阻断取消信号。
+        return Flux.defer(() -> {
+            String requestId = UUID.randomUUID().toString();
+            String conversationRef = conversationRef(request);
+            long startedNanos = System.nanoTime();
+            AtomicReference<ChatClientResponse> aggregated = new AtomicReference<>();
+            log.info("ai.stream.started requestId={} conversationRef={}", requestId, conversationRef);
+            return new ChatClientMessageAggregator()
+                    .aggregateChatClientResponse(Flux.defer(() -> chain.nextStream(request)), aggregated::set)
+                    .doOnComplete(() -> {
+                        long durationMs = Duration.ofNanos(System.nanoTime() - startedNanos).toMillis();
+                        if (aggregated.get() != null) {
+                            logSuccess(requestId, conversationRef, durationMs, aggregated.get());
+                        } else {
+                            log.warn("ai.stream.completed requestId={} conversationRef={} durationMs={} responsePresent=false",
+                                    requestId, conversationRef, durationMs);
+                        }
+                    })
+                    .doOnError(error -> logFailure(requestId, conversationRef,
+                            Duration.ofNanos(System.nanoTime() - startedNanos).toMillis(), error))
+                    .doFinally(signal -> {
+                        if (signal == SignalType.CANCEL) {
+                            log.info("ai.stream.cancelled requestId={} conversationRef={} durationMs={}",
+                                    requestId, conversationRef,
+                                    Duration.ofNanos(System.nanoTime() - startedNanos).toMillis());
+                        }
+                    });
+        });
     }
 
     public ProductionLoggingAdvisor(
@@ -116,9 +156,9 @@ public final class ProductionLoggingAdvisor implements CallAdvisor {
 
         String model = safeLogValue(metadata.getModel());
         String providerResponseId = safeLogValue(metadata.getId());
-        Integer promptTokens = usage.getPromptTokens();
-        Integer completionTokens = usage.getCompletionTokens();
-        Integer totalTokens = usage.getTotalTokens();
+        Integer promptTokens = usage == null ? null : usage.getPromptTokens();
+        Integer completionTokens = usage == null ? null : usage.getCompletionTokens();
+        Integer totalTokens = usage == null ? null : usage.getTotalTokens();
         boolean toolCalls = chatResponse.hasToolCalls();
 
         log.info(
@@ -136,7 +176,6 @@ public final class ProductionLoggingAdvisor implements CallAdvisor {
 
         if (this.logContent && log.isDebugEnabled()
                 && chatResponse.getResult() != null) {
-            chatResponse.getResult();
             String completion = Objects.requireNonNullElse(
                     chatResponse.getResult().getOutput().getText(), "");
             log.debug("ai.call.completion requestId={} content={}",
@@ -148,7 +187,7 @@ public final class ProductionLoggingAdvisor implements CallAdvisor {
             String requestId,
             String conversationRef,
             long durationMs,
-            RuntimeException ex) {
+            Throwable ex) {
 
         String errorType = ex.getClass().getName();
         if (this.includeStackTrace) {
